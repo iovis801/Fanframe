@@ -1,0 +1,5 @@
+[run]
+# The GTK UI is verified manually/visually, not via line-coverage unit tests
+# (it needs a display and a running daemon). Everything else is unit-tested.
+omit =
+    */gui/*

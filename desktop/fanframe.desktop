@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=FanFrame
+GenericName=Fan Control
+Comment=Controllo ventole e temperature del Framework Desktop
+Exec=fanframe-gui
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;Settings;HardwareSettings;
+Keywords=fan;ventole;temperature;cooling;framework;

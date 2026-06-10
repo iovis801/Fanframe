@@ -1,0 +1,30 @@
+[Unit]
+Description=FanFrame privileged fan-control daemon (Framework Desktop)
+Documentation=https://github.com/FrameworkComputer/framework-system
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m fanframe.daemon
+Environment=PYTHONPATH=/opt/fanframe/src
+Environment=FANFRAME_SOCKET=/run/fanframe.sock
+Environment=FANFRAME_GROUP=__GROUP__
+Environment=FANFRAME_TOOL=/usr/local/bin/framework_tool
+Environment=FANFRAME_CRITICAL_C=92
+Restart=on-failure
+RestartSec=2
+
+# Hardening. PrivateDevices is intentionally NOT set: framework_tool needs
+# /dev/cros_ec. ProtectSystem=full keeps /run writable for the socket.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
