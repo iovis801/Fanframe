@@ -33,11 +33,18 @@ def test_set_duty_single_fan_clamps():
     assert calls == [["/x/framework_tool", "--fansetduty", "2", "100"]]
 
 
-def test_set_auto_argv():
+def test_set_auto_all_fans_argv():
     calls = []
     controller = ec.EcController(tool_path="/x/framework_tool", runner=_runner(calls))
     controller.set_auto()
     assert calls == [["/x/framework_tool", "--autofanctrl"]]
+
+
+def test_set_auto_single_fan_argv():
+    calls = []
+    controller = ec.EcController(tool_path="/x/framework_tool", runner=_runner(calls))
+    controller.set_auto(fan=2)
+    assert calls == [["/x/framework_tool", "--autofanctrl", "2"]]
 
 
 def test_nonzero_exit_raises_ecerror():

@@ -30,10 +30,9 @@ LISTEN_BACKLOG = 8
 
 @dataclass(frozen=True)
 class State:
-    mode: str = protocol.MODE_AUTO
-    # last manual duty per EC fan index (0-based). Empty in auto mode or when
-    # all fans were set at once.
-    duties: dict[int, int] = field(default_factory=dict)
+    # Manual duty per EC fan index (0-based). A fan absent from this map is
+    # under automatic (EC) control.
+    fans: dict[int, int] = field(default_factory=dict)
 
 
 class Daemon:
@@ -52,10 +51,10 @@ class Daemon:
         self._lock = threading.Lock()
         self._stop = threading.Event()
 
-    def _duties_view(self) -> dict[str, int]:
+    def _fans_view(self) -> dict[str, int]:
         # JSON object keys must be strings; keep the wire shape consistent
         # whether handle() is called in-process or over the socket.
-        return {str(index): duty for index, duty in self._state.duties.items()}
+        return {str(index): duty for index, duty in self._state.fans.items()}
 
     # ---- request handling -------------------------------------------------
     def handle(self, request: dict) -> dict:
@@ -63,27 +62,34 @@ class Daemon:
         try:
             if cmd == protocol.CMD_STATUS:
                 with self._lock:
-                    return protocol.ok_response(mode=self._state.mode, duties=self._duties_view())
+                    return protocol.ok_response(fans=self._fans_view())
             if cmd == protocol.CMD_SET_DUTY:
                 duty = protocol.clamp_duty(int(request.get("value", 0)))
                 fan = request.get("fan")
                 fan = int(fan) if fan is not None else None
                 self._ec.set_duty(duty, fan)
                 with self._lock:
-                    duties = dict(self._state.duties)
+                    fans = dict(self._state.fans)
                     if fan is None:
-                        duties = {}  # all-fans set: no meaningful per-fan state
+                        fans = {}  # all fans set at once: no meaningful per-fan state
                     else:
-                        duties[fan] = duty
-                    self._state = State(protocol.MODE_MANUAL, duties)
+                        fans[fan] = duty
+                    self._state = State(fans)
                 LOG.info("manual duty %d%% on fan %s", duty, "all" if fan is None else fan)
-                return protocol.ok_response(mode=protocol.MODE_MANUAL, fan=fan, duty=duty)
+                return protocol.ok_response(fan=fan, duty=duty)
             if cmd == protocol.CMD_AUTO:
-                self._ec.set_auto()
+                fan = request.get("fan")
+                fan = int(fan) if fan is not None else None
+                self._ec.set_auto(fan)
                 with self._lock:
-                    self._state = State(protocol.MODE_AUTO, {})
-                LOG.info("automatic fan control restored")
-                return protocol.ok_response(mode=protocol.MODE_AUTO, duties={})
+                    fans = dict(self._state.fans)
+                    if fan is None:
+                        fans = {}
+                    else:
+                        fans.pop(fan, None)
+                    self._state = State(fans)
+                LOG.info("automatic control restored for fan %s", "all" if fan is None else fan)
+                return protocol.ok_response(fan=fan)
             return protocol.error_response(f"unknown command: {cmd!r}")
         except (ec.EcError, ValueError, TypeError) as exc:
             LOG.warning("command %r failed: %s", cmd, exc)
@@ -92,7 +98,7 @@ class Daemon:
     # ---- thermal failsafe -------------------------------------------------
     def _failsafe_tick(self) -> None:
         with self._lock:
-            manual = self._state.mode == protocol.MODE_MANUAL
+            manual = bool(self._state.fans)
         if not manual:
             return
         try:
@@ -104,9 +110,9 @@ class Daemon:
             return
         LOG.warning("FAILSAFE: cpu %.1f C >= %.1f C, restoring auto", hottest, self._critical_c)
         try:
-            self._ec.set_auto()
+            self._ec.set_auto(None)
             with self._lock:
-                self._state = State(protocol.MODE_AUTO, {})
+                self._state = State({})
         except ec.EcError as exc:
             LOG.error("failsafe could not restore auto: %s", exc)
 

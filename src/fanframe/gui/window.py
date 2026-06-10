@@ -4,9 +4,10 @@ Sensor values are read directly from sysfs (no privileges); control commands go
 to the privileged daemon over its Unix socket. The window itself never runs as
 root. Run with: `fanframe-gui` or `python -m fanframe.gui.window`.
 
-Each fan gets its own slider (EC index is 0-based: sysfs fan1 -> index 0) with
-its live RPM shown next to it, plus one global button to hand control back to
-the EC.
+Each fan has an editable name, its live RPM, an Auto toggle, and a duty slider.
+When a fan is in automatic mode its slider is disabled (greyed out) and the Auto
+toggle is pressed, so the current mode is always visible at a glance. The EC fan
+index is 0-based, so sysfs `fan1` maps to `--fansetduty 0 <pct>`.
 """
 from __future__ import annotations
 
@@ -16,11 +17,12 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
 from .. import client as client_mod  # noqa: E402
-from .. import protocol, sensors  # noqa: E402
+from .. import config, sensors  # noqa: E402
 
 POLL_INTERVAL_MS = 1000
 DUTY_DEBOUNCE_MS = 350
 DUTY_MARKS = (0, 25, 50, 75, 100)
+DAEMON_DOWN = "fanframed daemon is not running — control unavailable."
 
 
 def ec_index(fan_name: str) -> int:
@@ -29,17 +31,25 @@ def ec_index(fan_name: str) -> int:
     return int(digits) - 1 if digits else 0
 
 
+def default_name(fan_name: str) -> str:
+    digits = "".join(ch for ch in fan_name if ch.isdigit())
+    return f"Fan {digits}" if digits else fan_name
+
+
 class FanFrameWindow(Gtk.ApplicationWindow):
     def __init__(self, app: Gtk.Application, client: client_mod.Client):
         super().__init__(application=app, title="FanFrame — Framework Desktop")
         self._client = client
+        self._labels = config.load_labels()
         self._temp_rows: dict[str, Gtk.Label] = {}
         self._rpm_labels: dict[str, Gtk.Label] = {}
+        self._name_widgets: dict[str, Gtk.EditableLabel] = {}
+        self._toggles: dict[str, Gtk.ToggleButton] = {}
         self._sliders: dict[str, Gtk.Scale] = {}
         self._suppress: set[str] = set()
         self._duty_timeouts: dict[str, int] = {}
-        self._pending_duties: dict[int, int] = {}
-        self.set_default_size(480, 520)
+        self._status_fans: dict[int, int] = {}
+        self.set_default_size(500, 560)
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         for setter in (root.set_margin_top, root.set_margin_bottom,
@@ -48,22 +58,22 @@ class FanFrameWindow(Gtk.ApplicationWindow):
         self.set_child(root)
 
         self._temp_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self._fan_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        root.append(_titled_frame("Temperature", self._temp_box))
-        root.append(_titled_frame("Ventole (controllo manuale)", self._fan_box))
+        self._fan_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        root.append(_titled_frame("Temperatures", self._temp_box))
+        root.append(_titled_frame("Fans", self._fan_box))
 
-        auto_btn = Gtk.Button(label="Automatico (EC) — tutte le ventole")
-        auto_btn.add_css_class("suggested-action")
-        auto_btn.set_halign(Gtk.Align.START)
-        auto_btn.connect("clicked", self._on_auto_clicked)
-        root.append(auto_btn)
+        all_auto = Gtk.Button(label="All fans: automatic (EC)")
+        all_auto.add_css_class("suggested-action")
+        all_auto.set_halign(Gtk.Align.START)
+        all_auto.connect("clicked", self._on_all_auto)
+        root.append(all_auto)
 
         self._status_label = Gtk.Label(xalign=0)
         self._status_label.add_css_class("dim-label")
         self._status_label.set_wrap(True)
         root.append(self._status_label)
 
-        self._refresh_status()
+        self._load_status()
         self._tick()
         GLib.timeout_add(POLL_INTERVAL_MS, self._tick)
 
@@ -72,7 +82,7 @@ class FanFrameWindow(Gtk.ApplicationWindow):
         try:
             snapshot = sensors.read_snapshot()
         except OSError:
-            self._set_status("Sensori cros_ec non trovati.")
+            self._set_status("cros_ec sensors not found.")
             return True
         self._update_temps(snapshot)
         self._update_fans(snapshot)
@@ -90,24 +100,29 @@ class FanFrameWindow(Gtk.ApplicationWindow):
     def _update_fans(self, snapshot: sensors.SensorSnapshot) -> None:
         for fan in snapshot.fans:
             self._ensure_fan_controls(fan.name)
-            self._rpm_labels[fan.name].set_text("ferma" if fan.rpm == 0 else f"{fan.rpm} RPM")
+            self._rpm_labels[fan.name].set_text("stopped" if fan.rpm == 0 else f"{fan.rpm} RPM")
 
     def _ensure_fan_controls(self, fan_name: str) -> None:
         if fan_name in self._sliders:
             return
-        caption = fan_name.replace("fan", "Ventola ")
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.set_margin_start(8)
         box.set_margin_end(8)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        name_label = Gtk.Label(label=caption, xalign=0)
-        name_label.set_hexpand(True)
-        name_label.add_css_class("heading")
+        name_widget = Gtk.EditableLabel(text=self._labels.get(fan_name) or default_name(fan_name))
+        name_widget.set_hexpand(True)
+        name_widget.add_css_class("heading")
+        name_widget.set_tooltip_text("Click to rename this fan")
+        name_widget.connect("notify::editing", self._on_name_editing, fan_name)
         rpm_label = Gtk.Label(xalign=1)
         rpm_label.add_css_class("dim-label")
-        header.append(name_label)
+        toggle = Gtk.ToggleButton(label="Auto")
+        toggle.set_tooltip_text("Automatic control for this fan")
+        toggle.connect("toggled", self._on_toggle, fan_name)
+        header.append(name_widget)
         header.append(rpm_label)
+        header.append(toggle)
         box.append(header)
 
         scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
@@ -119,15 +134,39 @@ class FanFrameWindow(Gtk.ApplicationWindow):
         scale.connect("value-changed", self._on_slider_changed, fan_name)
         box.append(scale)
 
+        self._name_widgets[fan_name] = name_widget
         self._rpm_labels[fan_name] = rpm_label
+        self._toggles[fan_name] = toggle
         self._sliders[fan_name] = scale
         self._fan_box.append(box)
 
-        pending = self._pending_duties.get(ec_index(fan_name))
-        if pending is not None:
-            self._set_slider_silently(fan_name, pending)
+        manual_duty = self._status_fans.get(ec_index(fan_name))
+        if manual_duty is None:
+            self._apply_mode(fan_name, auto=True)
+        else:
+            self._apply_mode(fan_name, auto=False, duty=manual_duty)
+
+    # ---- mode helpers -----------------------------------------------------
+    def _apply_mode(self, fan_name: str, auto: bool, duty: int | None = None) -> None:
+        self._suppress.add(fan_name)
+        self._toggles[fan_name].set_active(auto)
+        self._sliders[fan_name].set_sensitive(not auto)
+        if duty is not None:
+            self._sliders[fan_name].set_value(duty)
+        self._suppress.discard(fan_name)
+
+    def _display(self, fan_name: str) -> str:
+        return self._labels.get(fan_name) or default_name(fan_name)
 
     # ---- control callbacks ------------------------------------------------
+    def _on_toggle(self, toggle: Gtk.ToggleButton, fan_name: str) -> None:
+        if fan_name in self._suppress:
+            return
+        if toggle.get_active():
+            self._command_auto(fan_name)
+        else:
+            self._command_manual(fan_name, int(self._sliders[fan_name].get_value()))
+
     def _on_slider_changed(self, _scale: Gtk.Scale, fan_name: str) -> None:
         if fan_name in self._suppress:
             return
@@ -140,43 +179,62 @@ class FanFrameWindow(Gtk.ApplicationWindow):
 
     def _commit_duty(self, fan_name: str) -> bool:
         self._duty_timeouts.pop(fan_name, None)
-        value = int(self._sliders[fan_name].get_value())
-        caption = fan_name.replace("fan", "Ventola ")
-        try:
-            self._client.set_duty(value, fan=ec_index(fan_name))
-            self._set_status(f"{caption}: {value}% — failsafe termico attivo.")
-        except client_mod.DaemonUnavailable:
-            self._set_status("Demone fanframed non attivo: impossibile impostare il duty.")
+        self._command_manual(fan_name, int(self._sliders[fan_name].get_value()))
         return False
 
-    def _on_auto_clicked(self, _button: Gtk.Button) -> None:
+    def _command_manual(self, fan_name: str, value: int) -> None:
         try:
-            self._client.set_auto()
-            self._set_status("Controllo automatico dell'EC ripristinato (tutte le ventole).")
+            self._client.set_duty(value, fan=ec_index(fan_name))
         except client_mod.DaemonUnavailable:
-            self._set_status("Demone fanframed non attivo: impossibile cambiare modalità.")
+            self._set_status(DAEMON_DOWN)
+            return
+        self._apply_mode(fan_name, auto=False)
+        self._set_status(f"{self._display(fan_name)}: {value}% (manual) — failsafe active.")
 
-    def _refresh_status(self) -> None:
+    def _command_auto(self, fan_name: str) -> None:
+        try:
+            self._client.set_auto(fan=ec_index(fan_name))
+        except client_mod.DaemonUnavailable:
+            self._set_status(DAEMON_DOWN)
+            return
+        self._apply_mode(fan_name, auto=True)
+        self._set_status(f"{self._display(fan_name)}: automatic (EC).")
+
+    def _on_all_auto(self, _button: Gtk.Button) -> None:
+        try:
+            self._client.set_auto(None)
+        except client_mod.DaemonUnavailable:
+            self._set_status(DAEMON_DOWN)
+            return
+        for fan_name in self._sliders:
+            self._apply_mode(fan_name, auto=True)
+        self._set_status("All fans: automatic (EC).")
+
+    # ---- rename -----------------------------------------------------------
+    def _on_name_editing(self, widget: Gtk.EditableLabel, _pspec, fan_name: str) -> None:
+        if widget.get_property("editing"):
+            return  # editing just started
+        text = widget.get_text().strip()
+        if not text:
+            text = default_name(fan_name)
+            self._suppress.add(fan_name)
+            widget.set_text(text)
+            self._suppress.discard(fan_name)
+        self._labels[fan_name] = text
+        try:
+            config.save_labels(self._labels)
+        except OSError:
+            self._set_status("Could not save fan name.")
+
+    # ---- status -----------------------------------------------------------
+    def _load_status(self) -> None:
         try:
             status = self._client.status()
         except client_mod.DaemonUnavailable:
-            self._set_status("Demone fanframed non attivo — sola lettura.")
+            self._set_status(DAEMON_DOWN + " (sensors still update)")
             return
-        duties = status.get("duties") or {}
-        self._pending_duties = {int(index): duty for index, duty in duties.items()}
-        for fan_name in self._sliders:
-            value = self._pending_duties.get(ec_index(fan_name))
-            if value is not None:
-                self._set_slider_silently(fan_name, value)
-        if status.get("mode") == protocol.MODE_MANUAL and self._pending_duties:
-            self._set_status("Modalità manuale attiva.")
-        else:
-            self._set_status("Automatico (EC).")
-
-    def _set_slider_silently(self, fan_name: str, value: int) -> None:
-        self._suppress.add(fan_name)
-        self._sliders[fan_name].set_value(value)
-        self._suppress.discard(fan_name)
+        fans = status.get("fans") or {}
+        self._status_fans = {int(index): duty for index, duty in fans.items()}
 
     def _set_status(self, text: str) -> None:
         self._status_label.set_text(text)

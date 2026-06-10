@@ -18,13 +18,18 @@ FanFrame wraps that in a desktop GUI with a safe privilege model.
 ## Features
 
 - **Per-fan sliders** (0–100% duty), each showing that fan's live RPM.
+- **Per-fan Auto toggle** — switch any single fan back to EC control. When a fan
+  is automatic its slider is disabled (greyed out) and the Auto button is
+  pressed, so the current mode is always obvious. A global button puts every fan
+  back to automatic at once.
+- **Renamable fans** — click a fan's name to rename it (e.g. "CPU", "Intake").
+  Names are saved per user under `~/.config/fanframe/labels.json`.
 - **Live readouts** of all `cros_ec` temperatures and fan speeds, refreshed once
   a second straight from the kernel.
-- **One-click automatic mode** to hand every fan back to the embedded controller.
-- **Thermal failsafe**: while in manual mode, the daemon restores automatic
-  control if a CPU sensor crosses a critical threshold (default 92 °C).
+- **Thermal failsafe**: while any fan is in manual mode, the daemon restores
+  automatic control if a CPU sensor crosses a critical threshold (default 92 °C).
 - **GUI never runs as root.** The only privileged code is a tiny daemon exposing
-  three operations over a group-restricted Unix socket.
+  status/set_duty/auto over a group-restricted Unix socket.
 
 ## Architecture
 
@@ -76,7 +81,9 @@ login group.
 
 - Drag a fan's slider to set its duty; it is applied ~350 ms after you stop. The
   RPM next to each slider confirms which physical fan responds.
-- Click **Automatico (EC)** to return all fans to automatic control.
+- Press a fan's **Auto** toggle to hand just that fan back to the EC (its slider
+  greys out). Use **All fans: automatic (EC)** to reset every fan at once.
+- Click a fan's name to rename it; the name persists across launches.
 - The panels keep updating even if the daemon is stopped (reads need no daemon).
 
 ## Safety

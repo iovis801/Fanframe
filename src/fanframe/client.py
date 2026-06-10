@@ -42,5 +42,5 @@ class Client:
             )
         )
 
-    def set_auto(self) -> dict:
-        return self._request(protocol.make_request(protocol.CMD_AUTO))
+    def set_auto(self, fan: int | None = None) -> dict:
+        return self._request(protocol.make_request(protocol.CMD_AUTO, fan=fan))

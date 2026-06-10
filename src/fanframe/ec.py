@@ -48,8 +48,11 @@ class EcController:
             return [self._tool, "--fansetduty", duty]
         return [self._tool, "--fansetduty", str(int(fan)), duty]
 
-    def auto_argv(self) -> list[str]:
-        return [self._tool, "--autofanctrl"]
+    def auto_argv(self, fan: int | None = None) -> list[str]:
+        # No index -> automatic control for all fans; an index targets one fan.
+        if fan is None:
+            return [self._tool, "--autofanctrl"]
+        return [self._tool, "--autofanctrl", str(int(fan))]
 
     def _execute(self, argv: Sequence[str]) -> str:
         try:
@@ -68,5 +71,5 @@ class EcController:
         self._execute(self.duty_argv(duty, fan))
         return duty
 
-    def set_auto(self) -> None:
-        self._execute(self.auto_argv())
+    def set_auto(self, fan: int | None = None) -> None:
+        self._execute(self.auto_argv(fan))

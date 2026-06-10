@@ -16,14 +16,14 @@ from fanframe import daemon
 class FakeEc:
     def __init__(self):
         self.duty_calls = []   # list of (value, fan)
-        self.auto_calls = 0
+        self.auto_calls = []   # list of fan args (None == all)
 
     def set_duty(self, value, fan=None):
         self.duty_calls.append((value, fan))
         return value
 
-    def set_auto(self):
-        self.auto_calls += 1
+    def set_auto(self, fan=None):
+        self.auto_calls.append(fan)
 
 
 def _wait_for_socket(path, timeout=5.0):
@@ -52,31 +52,34 @@ def running_daemon(tmp_path):
 def test_status_roundtrip(running_daemon):
     socket_path, _ = running_daemon
     client = client_mod.Client(socket_path=socket_path)
-    assert client.status() == {"ok": True, "mode": "auto", "duties": {}}
+    assert client.status() == {"ok": True, "fans": {}}
 
 
 def test_set_duty_per_fan_roundtrip(running_daemon):
     socket_path, fake = running_daemon
     client = client_mod.Client(socket_path=socket_path)
-    assert client.set_duty(70, fan=0) == {"ok": True, "mode": "manual", "fan": 0, "duty": 70}
+    assert client.set_duty(70, fan=0) == {"ok": True, "fan": 0, "duty": 70}
     assert fake.duty_calls == [(70, 0)]
-    # duties come back string-keyed over the wire
-    assert client.status() == {"ok": True, "mode": "manual", "duties": {"0": 70}}
+    # manual duties come back string-keyed over the wire
+    assert client.status() == {"ok": True, "fans": {"0": 70}}
 
 
-def test_set_duty_all_fans_roundtrip(running_daemon):
+def test_auto_single_fan_roundtrip(running_daemon):
     socket_path, fake = running_daemon
     client = client_mod.Client(socket_path=socket_path)
-    assert client.set_duty(45) == {"ok": True, "mode": "manual", "fan": None, "duty": 45}
-    assert fake.duty_calls == [(45, None)]
+    client.set_duty(70, fan=0)
+    client.set_duty(40, fan=1)
+    assert client.set_auto(fan=0) == {"ok": True, "fan": 0}
+    assert fake.auto_calls == [0]
+    assert client.status() == {"ok": True, "fans": {"1": 40}}
 
 
-def test_auto_roundtrip(running_daemon):
+def test_auto_all_fans_roundtrip(running_daemon):
     socket_path, fake = running_daemon
     client = client_mod.Client(socket_path=socket_path)
     client.set_duty(40, fan=1)
-    assert client.set_auto() == {"ok": True, "mode": "auto", "duties": {}}
-    assert fake.auto_calls == 1
+    assert client.set_auto() == {"ok": True, "fan": None}
+    assert fake.auto_calls == [None]
 
 
 def test_client_raises_when_daemon_absent(tmp_path):
